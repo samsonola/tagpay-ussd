@@ -1,0 +1,6 @@
+/scripts/
+/node_modules/
+/.env
+/storage/logs/
+/src/data/
+/src/stale/
