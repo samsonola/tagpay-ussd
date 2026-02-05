@@ -278,104 +278,97 @@ case 'main-menu': {
       }
 
 
-// ================= BANK MENU =================
-case 'bank-menu': {
-  const quickBanks = {
-    '2': { name: 'Access Bank', code: '044' },
-    '3': { name: 'GTBank', code: '058' },
-    '4': { name: 'Zenith Bank', code: '057' }
-  };
 
-  if (lastInput === '1') {
-    session.step = 'bank-search';
-    return res.send('CON Enter bank name');
-  }
+ // ---------------- BANK MENU ----------------
+      case 'bank-menu': {
+        const quickBanks = {
+          '2': { name: 'Access Bank', code: '044' },
+          '3': { name: 'GTBank', code: '058' },
+          '4': { name: 'Zenith Bank', code: '057' }
+        };
 
-  const bank = quickBanks[lastInput];
-  if (!bank) {
-    endSession(phoneNumber);
-    return res.send('END Invalid bank selection');
-  }
+        if (lastInput === '1') {
+          session.step = 'bank-search';
+          return res.send('CON Enter bank name to search');
+        }
 
-  updateSession(phoneNumber, 'bank', bank);
-  session.step = 'bank-account';
-  return res.send('CON Enter recipient account number');
-}
+        const bank = quickBanks[lastInput];
+        if (!bank) {
+          endSession(phoneNumber);
+          return res.send('END Invalid bank selection');
+        }
 
-// ================= BANK SEARCH =================
-// ================= BANK SEARCH =================
-case 'bank-search': {
-  updateSession(phoneNumber, 'bankSearch', lastInput);
-  updateSession(phoneNumber, 'bankPage', 0); // start at page 0
+        updateSession(phoneNumber, 'bank', bank);
+        session.step = 'bank-account';
+        return res.send(`CON Enter recipient account number for ${bank.name}`);
+      }
 
-  const page = 0;
-  const pageSize = 4; // show 4 banks per page
+      // ---------------- BANK SEARCH ----------------
+      case 'bank-search': {
+        updateSession(phoneNumber, 'bankSearch', lastInput);
+        updateSession(phoneNumber, 'bankPage', 0);
 
-  const { banks, total } = await listBanks(lastInput, page, pageSize); // modify listBanks to accept pageSize
-  if (!banks.length) {
-    endSession(phoneNumber);
-    return res.send('END No banks found');
-  }
+        const page = 0;
+        const pageSize = 4;
+        const { banks, total } = await listBanks(lastInput, page, pageSize);
 
-  const hasNext = total > (page + 1) * pageSize;
-  const hasPrev = page > 0;
+        if (!banks.length) {
+          endSession(phoneNumber);
+          return res.send('END No banks found');
+        }
 
-  updateSession(phoneNumber, 'bankResults', banks);
-  updateSession(phoneNumber, 'bankPage', page);
-  session.step = 'bank-search-select';
+        updateSession(phoneNumber, 'bankResults', banks);
+        updateSession(phoneNumber, 'bankPage', page);
+        session.step = 'bank-search-select';
 
-  let menu = 'CON Select Bank\n';
-  banks.forEach((b, i) => {
-    menu += `${i + 1}. ${b.name}\n`;
-  });
-  if (hasPrev) menu += '98. Previous\n';
-  if (hasNext) menu += '99. Next';
+        let menu = 'CON Select Bank\n';
+        banks.forEach((b, i) => {
+          menu += `${i + 1}. ${b.name}\n`;
+        });
 
-  return res.send(menu.trim());
-}
+        if (page > 0) menu += '98. Previous\n';
+        if (total > (page + 1) * pageSize) menu += '99. Next';
 
-// ================= BANK SEARCH SELECT =================
-case 'bank-search-select': {
-  let page = session.data.bankPage || 0;
-  const search = session.data.bankSearch;
-  const pageSize = 4;
+        return res.send(menu.trim());
+      }
 
-  if (lastInput === '98') page--;
-  else if (lastInput === '99') page++;
-  else {
-    // user picked a bank
-    const bank = session.data.bankResults[parseInt(lastInput) - 1];
-    if (!bank) {
-      endSession(phoneNumber);
-      return res.send('END Invalid bank selection');
-    }
-    updateSession(phoneNumber, 'bank', bank);
-    session.step = 'bank-account';
-    return res.send('CON Enter recipient account number');
-  }
+      // ---------------- BANK SEARCH SELECT ----------------
+      case 'bank-search-select': {
+        let page = session.data.bankPage || 0;
+        const search = session.data.bankSearch;
+        const pageSize = 4;
 
-  // fetch new page
-  const { banks, total } = await listBanks(search, page, pageSize);
-  const hasNext = total > (page + 1) * pageSize;
-  const hasPrev = page > 0;
+        if (lastInput === '98') page--;
+        else if (lastInput === '99') page++;
+        else {
+          const bank = session.data.bankResults[parseInt(lastInput) - 1];
+          if (!bank) {
+            endSession(phoneNumber);
+            return res.send('END Invalid bank selection');
+          }
+          updateSession(phoneNumber, 'bank', bank);
+          session.step = 'bank-account';
+          return res.send(`CON Enter recipient account number for ${bank.name}`);
+        }
 
-  if (!banks.length) {
-    endSession(phoneNumber);
-    return res.send('END No more banks found');
-  }
+        const { banks, total } = await listBanks(search, page, pageSize);
+        if (!banks.length) {
+          endSession(phoneNumber);
+          return res.send('END No more banks found');
+        }
 
-  updateSession(phoneNumber, 'bankResults', banks);
-  updateSession(phoneNumber, 'bankPage', page);
+        updateSession(phoneNumber, 'bankResults', banks);
+        updateSession(phoneNumber, 'bankPage', page);
 
-  let menu = 'CON Select Bank\n';
-  banks.forEach((b, i) => {
-    menu += `${i + 1}. ${b.name}\n`;
-  });
-  if (hasPrev) menu += '98. Previous\n';
-  if (hasNext) menu += '99. Next';
+        let menu = 'CON Select Bank\n';
+        banks.forEach((b, i) => {
+          menu += `${i + 1}. ${b.name}\n`;
+        });
+        if (page > 0) menu += '98. Previous\n';
+        if (total > (page + 1) * pageSize) menu += '99. Next';
 
-  return res.send(menu.trim());
-}
+        return res.send(menu.trim());
+      }
 
       // ================= ACCOUNT NUMBER =================
       case 'bank-account': {
