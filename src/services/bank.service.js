@@ -1,214 +1,443 @@
-// src/services/bank.service.js
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 
-// ==================== HEADERS ====================
 const headers = {
   Authorization: `Bearer ${process.env.MERCHANT_SECRET}`,
   'Content-Type': 'application/json'
 };
 
-// ==================== HELPERS ====================
+// ---------------- HELPERS ----------------
 function formatPhone(phone) {
   phone = phone.replace(/\D/g, '');
   if (phone.startsWith('0')) phone = '234' + phone.slice(1);
   return phone;
 }
 
-// ==================== BANK LIST ====================
+// ---------------- BANK LIST ----------------
 const bankListPath = path.join(__dirname, '../data/banklist.json');
-let banks = [];
+let banks = JSON.parse(fs.readFileSync(bankListPath));
 
-function loadBankList() {
-  try {
-    const raw = fs.readFileSync(bankListPath, 'utf-8');
-    banks = JSON.parse(raw);
-    console.log(`[BankService] Bank list loaded: ${banks.length} banks`);
-  } catch (err) {
-    console.error('[BankService] Failed to load bank list:', err.message);
-    banks = [];
-  }
-}
-
-function listBanks(searchTerm = '', page = 0, pageSize = 10) {
-  let filtered = banks;
-  if (searchTerm) {
-    const search = searchTerm.toLowerCase();
-    filtered = banks.filter(b => b.name.toLowerCase().includes(search));
-  }
-  const start = page * pageSize;
-  const pagedBanks = filtered.slice(start, start + pageSize);
-  return {
-    banks: pagedBanks,
-    hasNext: start + pageSize < filtered.length,
-    hasPrev: page > 0
-  };
-}
-
-function getBankByCode(code) {
-  return banks.find(b => b.code === code) || null;
-}
-
-// ==================== TAGPAY API ====================
+// ---------------- TAGPAY APIs ----------------
 async function checkUserByPhone(phoneNumber) {
   const phone = formatPhone(phoneNumber);
-  try {
-    const res = await axios.get(
-      `https://core-api.tagpay.ng/v1/customer/phone?phoneNumber=${phone}`,
-      { headers }
-    );
-    return res.data.status ? res.data.customer : null;
-  } catch (err) {
-    console.error('checkUserByPhone error:', err.response?.data || err.message);
-    return null;
-  }
+  const res = await axios.get(
+    `https://core-api.tagpay.ng/v1/customer/phone?phoneNumber=${phone}`,
+    { headers }
+  );
+  return res.data.status ? res.data.customer : null;
+}
+
+async function getUserByAccount(accountNumber) {
+  const res = await axios.get(
+    'https://core-api.tagpay.ng/v1/wallet/customer/account',
+    { headers, params: { accountNumber } }
+  );
+  return res.data?.status ? res.data.wallet : null;
 }
 
 async function nameEnquiry(sortCode, accountNumber) {
-  try {
-    const res = await axios.get(
-      'https://core-api.tagpay.ng/v1/transfer/account/details',
-      { headers, params: { sortCode, accountNumber } }
-    );
-    return res.data.status ? res.data.account : null;
-  } catch (err) {
-    console.error('nameEnquiry error:', err.response?.data || err.message);
-    return null;
-  }
+  const res = await axios.get(
+    'https://core-api.tagpay.ng/v1/transfer/account/details',
+    { headers, params: { sortCode, accountNumber } }
+  );
+  return res.data.status ? res.data.account : null;
 }
 
-async function bankTransfer({ accountNumber, bank, amount, narration, accountName, customerId, metadata }) {
-  try {
-    if (!bank || !bank.code) {
-      return { status: false, message: 'Bank not found' };
-    }
-    if (!customerId) {
-      return { status: false, message: 'Customer ID is required' };
-    }
-
-    const payload = {
-      accountNumber,
-      sortCode: bank.code,
-      amount,
-      narration,
-      accountName,
-      customerId,
-      metadata: metadata || {},
-      reference: uuidv4()
-    };
-
-    console.log('[BankService] Transfer payload:', JSON.stringify(payload, null, 2));
-
-    const res = await axios.post(
-      'https://core-api.tagpay.ng/v1/transfer/bank/customer',
-      payload,
-      { headers }
-    );
-
-    console.log('[BankService] Transfer response:', res.data);
-    return res.data;
-
-  } catch (err) {
-    console.error('bankTransfer error FULL:', {
-      message: err.message,
-      response: err.response?.data,
-      status: err.response?.status
-    });
-    return { status: false, message: err.response?.data?.message || err.message };
-  }
+async function bankTransfer(payload) {
+  if (!payload.reference) throw new Error('reference is required');
+  const res = await axios.post(
+    'https://core-api.tagpay.ng/v1/transfer/bank/customer',
+    payload,
+    { headers }
+  );
+  return res.data;
 }
 
-// ==================== WALLET FEE TRANSFER ====================
-async function walletFeeTransfer({ amount, fromCustomerId }) {
-  try {
-    const payload = {
-      amount,
-      fromCustomerId,
-      toCustomerId: process.env.toCustomerId
-    };
-
-    const feeHeaders = {
-      Authorization: `Bearer ${process.env.MERCHANT_FEE}`,
-      'Content-Type': 'application/json'
-    };
-
-    console.log('[BankService] Wallet fee transfer payload:', JSON.stringify(payload, null, 2));
-
-    const res = await axios.post(
-      'https://core-api.tagpay.ng/v1/transfer/wallet',
-      payload,
-      { headers: feeHeaders }
-    );
-
-    // console.log('[BankService] Wallet fee transfer response:', res.data);
-    return res.data;
-
-  } catch (err) {
-    // console.error('[BankService] walletFeeTransfer error FULL:', {
-    //   message: err.message,
-    //   response: err.response?.data,
-    //   status: err.response?.status
-    // });
-    return { status: false, message: err.response?.data?.message || err.message };
-  }
+async function walletToWalletTransfer(payload) {
+  const res = await axios.post(
+    'https://core-api.tagpay.ng/v1/transfer/wallet',
+    payload,
+    { headers }
+  );
+  return res.data;
 }
 
+// ---------------- FEE SPLIT ----------------
+async function transferCharge({ feeAmount, fromCustomerId }) {
+  const vatPercent = parseFloat(process.env.VAT_PERCENT || '7.5');
+  const merchantAmount = feeAmount;
+  const cbnAmount = +(feeAmount * vatPercent / 100).toFixed(2);
 
-// TagPay wallet-to-wallet
-async function walletToWalletTransfer({ amount, fromCustomerId, toCustomerId }) {
-  try {
-    const res = await axios.post('https://core-api.tagpay.ng/v1/transfer/wallet', { amount, fromCustomerId, toCustomerId }, { headers });
-    return res.data;
-  } catch (err) {
-    return { status: false, message: err.response?.data?.message || err.message };
-  }
-}
+  const cbnTransfer = await axios.post(
+    'https://core-api.tagpay.ng/v1/transfer/wallet',
+    { amount: cbnAmount, fromCustomerId, toCustomerId: process.env.toCbnId },
+    { headers: { Authorization: `Bearer ${process.env.CBN_FEE_SECRET}`, 'Content-Type': 'application/json' } }
+  );
 
-// Wallet fee transfer
-async function walletFeeTransfer({ amount, fromCustomerId }) {
-  try {
-    const res = await axios.post(
-      'https://core-api.tagpay.ng/v1/transfer/wallet',
-      { amount, fromCustomerId, toCustomerId: process.env.toCustomerId },
-      { headers: { Authorization: `Bearer ${process.env.MERCHANT_FEE}`, 'Content-Type': 'application/json' } }
-    );
-    return res.data;
-  } catch {
-    return { status: false };
-  }
+  const merchantTransfer = await axios.post(
+    'https://core-api.tagpay.ng/v1/transfer/wallet',
+    { amount: merchantAmount, fromCustomerId, toCustomerId: process.env.toCustomerId },
+    { headers: { Authorization: `Bearer ${process.env.MERCHANT_FEE}`, 'Content-Type': 'application/json' } }
+  );
+
+  return {
+    merchantAmount,
+    cbnAmount,
+    merchantTransfer: merchantTransfer.data,
+    cbnTransfer: cbnTransfer.data
+  };
 }
 
 async function getAccountBalanceByPhone(phoneNumber) {
   const customer = await checkUserByPhone(phoneNumber);
   if (!customer) return 0;
-  try {
-    const res = await axios.get(
-      `https://core-api.tagpay.ng/v1/wallet/customer?customerId=${customer.id}`,
-      { headers }
-    );
-    return res.data.status && res.data.wallet ? res.data.wallet.availableBalance || 0 : 0;
-  } catch (err) {
-    console.error('getAccountBalanceByPhone error:', err.response?.data || err.message);
-    return 0;
-  }
+
+  const res = await axios.get(
+    `https://core-api.tagpay.ng/v1/wallet/customer?customerId=${customer.id}`,
+    { headers }
+  );
+
+  return res.data?.wallet?.availableBalance || 0;
 }
 
-// Load bank list on import
-loadBankList();
-
 module.exports = {
-  loadBankList,
-  listBanks,
-  getBankByCode,
   checkUserByPhone,
+  getUserByAccount,
   nameEnquiry,
   bankTransfer,
-  walletFeeTransfer,
   walletToWalletTransfer,
-  getAccountBalanceByPhone
+  transferCharge,
+  getAccountBalanceByPhone,
+  listBanks: (s, p) => ({ banks, hasNext: false, hasPrev: false })
 };
+
+
+
+
+// // src/services/bank.service.js
+// const axios = require('axios');
+// const fs = require('fs');
+// const path = require('path');
+// const { v4: uuidv4 } = require('uuid');
+
+// // ==================== HEADERS ====================
+// const headers = {
+//   Authorization: `Bearer ${process.env.MERCHANT_SECRET}`,
+//   'Content-Type': 'application/json'
+// };
+
+// // ==================== HELPERS ====================
+// function formatPhone(phone) {
+//   phone = phone.replace(/\D/g, '');
+//   if (phone.startsWith('0')) phone = '234' + phone.slice(1);
+//   return phone;
+// }
+
+// // ==================== BANK LIST ====================
+// const bankListPath = path.join(__dirname, '../data/banklist.json');
+// let banks = [];
+
+// function loadBankList() {
+//   try {
+//     const raw = fs.readFileSync(bankListPath, 'utf-8');
+//     banks = JSON.parse(raw);
+//     console.log(`[BankService] Bank list loaded: ${banks.length} banks`);
+//   } catch (err) {
+//     console.error('[BankService] Failed to load bank list:', err.message);
+//     banks = [];
+//   }
+// }
+
+// function listBanks(searchTerm = '', page = 0, pageSize = 10) {
+//   let filtered = banks;
+//   if (searchTerm) {
+//     const search = searchTerm.toLowerCase();
+//     filtered = banks.filter(b => b.name.toLowerCase().includes(search));
+//   }
+//   const start = page * pageSize;
+//   const pagedBanks = filtered.slice(start, start + pageSize);
+//   return {
+//     banks: pagedBanks,
+//     hasNext: start + pageSize < filtered.length,
+//     hasPrev: page > 0
+//   };
+// }
+
+// function getBankByCode(code) {
+//   return banks.find(b => b.code === code) || null;
+// }
+
+// // ==================== TAGPAY API ====================
+// async function checkUserByPhone(phoneNumber) {
+//   const phone = formatPhone(phoneNumber);
+//   try {
+//     const res = await axios.get(
+//       `https://core-api.tagpay.ng/v1/customer/phone?phoneNumber=${phone}`,
+//       { headers }
+//     );
+//     return res.data.status ? res.data.customer : null;
+//   } catch (err) {
+//     console.error('checkUserByPhone error:', err.response?.data || err.message);
+//     return null;
+//   }
+// }
+
+// async function getUserByAccount(accountNumber) {
+//   try {
+//     const res = await axios.get(
+//       'https://core-api.tagpay.ng/v1/wallet/customer/account',
+//       {
+//         headers,
+//         params: { accountNumber }
+//       }
+//     );
+
+//     if (!res.data?.status || !res.data?.wallet) {
+//       return null;
+//     }
+
+//     const wallet = res.data.wallet;
+
+//     return {
+//       customerId: wallet.customerId,
+//       accountNumber: wallet.accountNumber,
+//       accountName: wallet.accountName,
+//       phoneNumber: wallet.phoneNumber,
+//       balance: wallet.availableBalance
+//     };
+
+//   } catch (err) {
+//     console.error(
+//       'getUserByAccount error:',
+//       err.response?.data || err.message
+//     );
+//     return null;
+//   }
+// }
+
+
+// async function nameEnquiry(sortCode, accountNumber) {
+//   try {
+//     const res = await axios.get(
+//       'https://core-api.tagpay.ng/v1/transfer/account/details',
+//       { headers, params: { sortCode, accountNumber } }
+//     );
+//     return res.data.status ? res.data.account : null;
+//   } catch (err) {
+//     console.error('nameEnquiry error:', err.response?.data || err.message);
+//     return null;
+//   }
+// }
+
+// async function bankTransfer({ accountNumber, bank, amount, narration, accountName, customerId, metadata }) {
+//   try {
+//     if (!bank || !bank.code) {
+//       return { status: false, message: 'Bank not found' };
+//     }
+//     if (!customerId) {
+//       return { status: false, message: 'Customer ID is required' };
+//     }
+
+//     const payload = {
+//       accountNumber,
+//       sortCode: bank.code,
+//       amount,
+//       narration,
+//       accountName,
+//       customerId,
+//       metadata: metadata || {},
+//       reference: uuidv4()
+//     };
+
+//     console.log('[BankService] Transfer payload:', JSON.stringify(payload, null, 2));
+
+//     const res = await axios.post(
+//       'https://core-api.tagpay.ng/v1/transfer/bank/customer',
+//       payload,
+//       { headers }
+//     );
+
+//     console.log('[BankService] Transfer response:', res.data);
+//     return res.data;
+
+//   } catch (err) {
+//     console.error('bankTransfer error FULL:', {
+//       message: err.message,
+//       response: err.response?.data,
+//       status: err.response?.status
+//     });
+//     return { status: false, message: err.response?.data?.message || err.message };
+//   }
+// }
+
+// // ==================== WALLET FEE TRANSFER ====================
+// async function walletFeeTransfer({ amount, fromCustomerId }) {
+//   try {
+//     const payload = {
+//       amount,
+//       fromCustomerId,
+//       toCustomerId: process.env.toCustomerId
+//     };
+
+//     const feeHeaders = {
+//       Authorization: `Bearer ${process.env.MERCHANT_FEE}`,
+//       'Content-Type': 'application/json'
+//     };
+
+//     console.log('[BankService] Wallet fee transfer payload:', JSON.stringify(payload, null, 2));
+
+//     const res = await axios.post(
+//       'https://core-api.tagpay.ng/v1/transfer/wallet',
+//       payload,
+//       { headers: feeHeaders }
+//     );
+
+//     // console.log('[BankService] Wallet fee transfer response:', res.data);
+//     return res.data;
+
+//   } catch (err) {
+//     // console.error('[BankService] walletFeeTransfer error FULL:', {
+//     //   message: err.message,
+//     //   response: err.response?.data,
+//     //   status: err.response?.status
+//     // });
+//     return { status: false, message: err.response?.data?.message || err.message };
+//   }
+// }
+
+
+// // TagPay wallet-to-wallet
+// async function walletToWalletTransfer({ amount, fromCustomerId, toCustomerId }) {
+//   try {
+//     const res = await axios.post('https://core-api.tagpay.ng/v1/transfer/wallet', { amount, fromCustomerId, toCustomerId }, { headers });
+//     return res.data;
+//   } catch (err) {
+//     return { status: false, message: err.response?.data?.message || err.message };
+//   }
+// }
+
+// // Wallet fee transfer
+// async function walletFeeTransfer({ amount, fromCustomerId }) {
+//   try {
+//     const res = await axios.post(
+//       'https://core-api.tagpay.ng/v1/transfer/wallet',
+//       { amount, fromCustomerId, toCustomerId: process.env.toCustomerId },
+//       { headers: { Authorization: `Bearer ${process.env.MERCHANT_FEE}`, 'Content-Type': 'application/json' } }
+//     );
+//     return res.data;
+//   } catch {
+//     return { status: false };
+//   }
+// }
+
+// /**
+//  * Transfer fee from customer
+//  * 10 → Merchant, 0.75 → CBN
+//  *
+//  * @param {number} feeAmount - fee for merchant
+//  * @param {string} fromCustomerId - wallet ID of customer paying
+//  * @param {string} bankTransferLogId - optional, to update bank_transfer_logs table
+//  */
+// async function transferCharge({ feeAmount, fromCustomerId, bankTransferLogId }) {
+//   if (!feeAmount || feeAmount <= 0) throw new Error('Invalid fee amount');
+//   if (!fromCustomerId) throw new Error('fromCustomerId is required');
+
+//   const vatPercent = parseFloat(process.env.VAT_PERCENT || '7.5');
+
+//   // Amounts
+//   const merchantAmount = parseFloat(feeAmount.toFixed(2)); // full fee to merchant
+//   const cbnAmount = parseFloat((feeAmount * (vatPercent / 100)).toFixed(2)); // VAT to CBN
+
+//   console.log(`[BankService] Fee split - Fee: ${merchantAmount}, VAT(7.5%): ${cbnAmount}`);
+
+//   let cbnTransfer = { status: false }, merchantTransfer = { status: false };
+
+//   // 1️⃣ Send VAT to CBN
+//   try {
+//     const res = await axios.post(
+//       'https://core-api.tagpay.ng/v1/transfer/wallet',
+//       { amount: cbnAmount, fromCustomerId, toCustomerId: process.env.toCbnId },
+//       { headers: { Authorization: `Bearer ${process.env.CBN_FEE_SECRET}`, 'Content-Type': 'application/json' } }
+//     );
+//     cbnTransfer = res.data;
+//     if (!cbnTransfer.status) console.error('[CBN Fee Transfer Failed]', cbnTransfer.message);
+//   } catch (err) {
+//     console.error('[CBN Fee Transfer Error]', err.response?.data || err.message);
+//   }
+
+//   // 2️⃣ Send Fee to Merchant
+//   try {
+//     const res = await axios.post(
+//       'https://core-api.tagpay.ng/v1/transfer/wallet',
+//       { amount: merchantAmount, fromCustomerId, toCustomerId: process.env.toCustomerId },
+//       { headers: { Authorization: `Bearer ${process.env.MERCHANT_FEE}`, 'Content-Type': 'application/json' } }
+//     );
+//     merchantTransfer = res.data;
+//     if (!merchantTransfer.status) console.error('[Merchant Fee Transfer Failed]', merchantTransfer.message);
+//   } catch (err) {
+//     console.error('[Merchant Fee Transfer Error]', err.response?.data || err.message);
+//   }
+
+//   // 3️⃣ Update DB if log ID is provided
+//   if (bankTransferLogId) {
+//     try {
+//       await pool.query('UPDATE bank_transfer_logs SET merchant_fee = ?, merchant_fee_status = ?, cbn_fee = ?, cbn_fee_status = ? WHERE id = ?', [
+//         merchantAmount,
+//         merchantTransfer.status ? 'success' : 'failed',
+//         cbnAmount,
+//         cbnTransfer.status ? 'success' : 'failed',
+//         bankTransferLogId
+//       ]);
+//     } catch (err) {
+//       console.error('[BankService] Failed to update bank_transfer_logs for fee:', err.message);
+//     }
+//   }
+
+//   return {
+//     status: cbnTransfer.status && merchantTransfer.status,
+//     totalFee: parseFloat((merchantAmount + cbnAmount).toFixed(2)), // total deducted from sender
+//     cbnAmount,
+//     merchantAmount,
+//     cbnTransfer,
+//     merchantTransfer
+//   };
+// }
+
+
+
+
+// async function getAccountBalanceByPhone(phoneNumber) {
+//   const customer = await checkUserByPhone(phoneNumber);
+//   if (!customer) return 0;
+//   try {
+//     const res = await axios.get(
+//       `https://core-api.tagpay.ng/v1/wallet/customer?customerId=${customer.id}`,
+//       { headers }
+//     );
+//     return res.data.status && res.data.wallet ? res.data.wallet.availableBalance || 0 : 0;
+//   } catch (err) {
+//     console.error('getAccountBalanceByPhone error:', err.response?.data || err.message);
+//     return 0;
+//   }
+// }
+
+// // Load bank list on import
+// loadBankList();
+
+// module.exports = {
+//   loadBankList,
+//   listBanks,
+//   getBankByCode,
+//   checkUserByPhone,
+//   nameEnquiry,
+//   getUserByAccount,
+//   bankTransfer,
+//    transferCharge,
+//   walletFeeTransfer,
+//   walletToWalletTransfer,
+//   getAccountBalanceByPhone
+// };
 
 
 
