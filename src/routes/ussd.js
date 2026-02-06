@@ -453,10 +453,11 @@ case 'main-menu': {
         });
 
         if (customerResult?.status === true) {
-          await walletToWalletTransfer({
-            amount: session.data.fee + session.data.vat,
-            fromCustomerId: session.data.customerId
-          });
+         await transferCharge({
+          feeAmount: session.data.fee,
+          fromCustomerId: session.data.customerId
+        });
+
         }
 
         endSession(phoneNumber);
