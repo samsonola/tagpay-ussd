@@ -1,2 +1,2 @@
 # tagpay-ussd
-USSD dervice for TagPay
+USSD service for TagPay
